@@ -27,7 +27,7 @@ Skipping the echo because "I just did one" is the failure mode.
 
 1. **Issues** — one or more, each with enough detail to investigate (what, where, why suspected). If any issue is too vague to act on, ask via `AskUserQuestion` before starting its flow.
 2. **Context** — what the reviewed target's purpose/mission is. Derive this primarily from the review's own stated scope or intent (usually already present in how the issues were framed or the surrounding task). Only ask the user via `AskUserQuestion` if it's genuinely unclear — don't invent a fallback source (README, docs, etc.) and don't guess.
-3. **Target location** — the file(s)/directory/repo being fixed.
+3. **Target location** — the file(s)/directory/repo being fixed. Try deriving it from Issues' own "where" first (Input #1 already requires it); treat that as provisional, not final — if Step 4's classification later shows the fix site isn't the citation site (e.g. `wrong-actor`), revisit it there. If nothing can be derived, ask via `AskUserQuestion` — don't invent a fallback and don't guess, same as Input #2.
 
 ---
 
@@ -35,7 +35,7 @@ Skipping the echo because "I just did one" is the failure mode.
 
 Seed a queue from Inputs' Issues. For each issue in the queue: run the 16-step flow below. Don't pause between issues. Steps 15/16 may discover related issues — append them to this same queue; keep draining until it's empty.
 
-When the queue started non-empty and ends empty, report back to the caller: for each issue, the files changed + a one-line summary of the fix (or the reason if declined as `non-issue` / crashed).
+When the queue started non-empty and ends empty, report back to the caller: for each issue, the files changed + a one-line summary of the fix (or the reason if declined as `non-issue` / crashed) — plus, as a separate list, any unconnected observations Steps 15/16 noted but didn't fix (not in scope, surfaced for the caller to decide).
 
 ---
 
@@ -53,7 +53,7 @@ The 7→12 sequence is a pendulum: 7/8 swing as far out as possible, 9/10 swing 
 
 **Dispatch mode:** Step 7's N≥3 subagents run in genuine parallel — dispatch with `run_in_background: true` and wait for all notifications before merging. Steps 5, 9, and 11 each dispatch a single subagent whose result the very next step depends on — no parallelism to gain, so dispatch in the foreground (blocking) and proceed once it returns.
 
-1. **Verify facts** — list concrete evidence: file:line citations, artifact output, reproduction steps.
+1. **Verify facts** — list concrete evidence: file:line citations, artifact output, reproduction steps. If the issue has executable behavior, construct a re-runnable reproduction and show it currently fails — Step 14 re-runs this exact artifact later, don't re-derive a new one there. Judgment-based behavior (e.g. verifying a procedure is followed correctly, with no deterministic assert available) still counts as executable — the artifact is an agent-executable scenario, and "pass" means a specific expected signal actually occurred (e.g. a specific tool call was made, a specific file ended up in a specific state) — not "the agent judged it correct." Skip only when there's no executable behavior at all. This isn't exempted by a `trivial` classification (see Step 4's skip-list, which doesn't include this step).
 2. **Context** — cross-file / cross-reference background. MUST include the target's stated purpose (from Inputs' Context), so all later steps can measure the fix against what the target exists to do.
 3. **Problem** — confirm real issue + scope. MUST state the issue's relation to the target's mission: `blocker` (fix serves mission directly) / `noise` (issue is not aligned with mission, consider dropping) / `tension` (fix trades off against mission, needs careful design) / `neutral` (independent of mission). If `noise`, exit here with cited reason.
 4. **Classify** — pick exactly one issue class:
@@ -100,21 +100,31 @@ The 7→12 sequence is a pendulum: 7/8 swing as far out as possible, 9/10 swing 
     **MUST dispatch adversarial subagent** (uninvested in step 10, no sunk cost). Subagent receives the Step 3 problem (primary) + 5 KISS rules + Step 10 trimmed diff (the target to attack) + Step 8 expanded version + Step 2 context (reference, to see what was swung out and pulled back, and to have the "business logic" Rule 2 checks against), prompted to **find violations**, not validate. For each rule, subagent attempts a hypothesized violation; parent reviews subagent's evidence and decides judgment. Parent's own walk happens in parallel as cross-check, not replacement. This breaks sunk-cost bias where parent's own KISS check rubber-stamps 5/5 not-violated.
 12. **First-principles version** — diff = step 10 + step 11 restorations. Derive from "simplest change satisfying the Step 3 problem". Goes into Edit.
 13. **Apply** — `Edit` directly. Don't `AskUserQuestion` for approval — this bans asking permission to proceed, not asking to resolve a genuine ambiguity (e.g. which of two files the diff targets) that step 12's diff left unresolved.
-14. **Verify** — check that every change in step 12's diff (or step 6's diff if `trivial`) actually landed (any pattern tool: `grep` / `Read` / etc.); if any change is missing, re-apply via Step 13. Report each change applied (file:line + summary).
-15. **Read-through** — scan the target for similar problems related to this fix. Pick a concrete check method matching the edit kind and report the tool output (don't narrate "all clear" without it; if the edit kind doesn't match any listed method, default to `Read` every section that could plausibly relate, in full):
+14. **Verify** — check that every change in step 12's diff (or step 6's diff if `trivial`) actually landed (any pattern tool: `grep` / `Read` / etc.); if any change is missing, re-apply via Step 13. If Step 1 constructed a reproduction, re-run that same artifact now (not a new one) and confirm it passes, citing the actual output. Report each change applied (file:line + summary) and the reproduction's result.
+15. **Read-through** — scan the target for similar problems related to this fix. Before checking, state the full list of candidate files/sections to inspect — a list assembled after the fact, or narrowed mid-check, doesn't satisfy this. Then pick a concrete check method matching the edit kind and report the tool output per candidate (don't narrate "all clear" without it; if the edit kind doesn't match any listed method, default to `Read` every section that could plausibly relate, in full):
     - added content → `Read` sections likely to contain similar patterns
     - removed content → `git diff` (or `diff` against a known-prior version) + `Read` each affected section's first content line
     - renamed identifier → `Read` each location mentioning either name
     - changed structure → `Read` sibling structural sections
 
-    `grep` does not substitute for `Read` here — `grep` is a pointer to candidate sections; the discipline is to `Read` each candidate in full.
+    `grep` does not substitute for `Read` here — `grep` is a pointer to candidate sections; the discipline is to `Read` each candidate in full. Nor does an `Edit`/`Write` tool message about a *different* file: "no need to Read it back" covers only the exact file just written, not anything else you're checking in this step.
+
+    The bullets above are search techniques, not a connectedness test — finding a candidate that way doesn't by itself make it related. It counts as a related problem only if you can cite the actual textual relationship at that location (file:line) — e.g. a real mention of the changed term/anchor, a real shared pattern. Something a search technique surfaced but that has no such relationship isn't related; note it as an unconnected observation instead (Drain Queue's final report carries these separately).
+
+    **MUST dispatch one adversarial subagent, unconditionally — no carve-out, including `trivial`** (both observed failures happened here; one was on the `trivial` path). Same rationale as Step 11. Subagent receives: Step 3 problem, Step 12/13 diff, Step 2 context, Target location — not the parent's own candidate list or Read outputs, so it searches independently, bound by the same Read discipline and the same file:line-connection standard above. Treat any cited finding from either side as real; if both cite the same one, append once.
 
     For each related problem found, append it to the Drain Queue. Do not fix now — draining continues until the queue is empty.
-16. **Regression check** — re-read every section related to the edit (cross-references, dependent rules, sections/functions that echo or feed into the edited one). Pick a concrete check method and report the tool output (don't narrate "no regression" without it; if the edit kind doesn't match any listed method, default to `Read` every related section in full):
+16. **Regression check** — re-read every section related to the edit (cross-references, dependent rules, sections/functions that echo or feed into the edited one). Before checking, state the full list of candidate files/sections to inspect, covering every file the edit touched, not just the primary one — a list assembled after the fact, or narrowed mid-check, doesn't satisfy this. Then pick a concrete check method and report the tool output per candidate (don't narrate "no regression" without it; if the edit kind doesn't match any listed method, default to `Read` every related section in full):
     - cross-references → `Read` each section mentioning the changed anchor
     - definitions → `Read` each section using the changed term
     - schemas / interfaces → `Read` each producer and consumer
     - rule lists / anti-patterns → `Read` for contradictions with the new edit
+
+    `grep` does not substitute for `Read` here either — a `grep` match list is not evidence of "no contradictions," and a `grep` whose scope omits one of the edited files proves nothing about that file. Nor does an `Edit`/`Write` tool message about one file extend to any other file or section you're checking here. `Read` each candidate section in full, in every file the edit touched.
+
+    Same file:line-connection standard as Step 15's: the bullets above are search techniques, not proof of a regression — cite the actual textual relationship at that location, or it's an unconnected observation, not a regression.
+
+    Same mandatory-unconditional adversarial-subagent mechanism as Step 15's, applied to regression-checking instead of related-problem-finding.
 
     Verify nothing else broke: no broken cross-refs, no contradictions, no new ambiguity. For each regression found, append it to the Drain Queue. Do not fix now — draining continues until the queue is empty.
 

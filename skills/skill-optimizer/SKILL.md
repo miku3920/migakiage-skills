@@ -29,7 +29,7 @@ Skipping the echo because "I just did one" is the failure mode.
 
 1. **Target skill path** — absolute path to skill directory.
 2. **Test input** (required only when target skill needs input) — file paths or inline task description; subagent prompt embeds verbatim. Mark N/A otherwise; subagent prompt omits the test-input line.
-3. **N** — parallel subagents per round, ≥ 3 (below 3 the `≥ N/3` threshold collapses; at N=3 Suspected also collapses).
+3. **N** — parallel runner subagents per round, ≥ 3 (below 3 the `≥ N/3` threshold collapses; at N=3 Suspected also collapses). Step 2 additionally dispatches N reviewer subagents (one per runner, a separate headcount from this N) — actual dispatch cost per iteration is 2N, not N.
 4. **M** — consecutive empty rounds to converge. Recommended ≥ 2.
 
 ---
@@ -54,7 +54,7 @@ loop:
   iteration += 1
   if iteration > 20: break (hard cap)
   step 1: spawn N subagents in parallel, each running target skill against test input
-  step 2: cross-run artifact comparison
+  step 2: dispatch N reviewer subagents (one per runner) to independently read each run's full output directory; merge into cross-run artifact comparison
   step 3: classify issues (real if ≥ N/3 runs show the same observed failure)
   step 4: cp -r <target-skill-path>/. /tmp/skill-optimizer-snapshot-<target-skill-name>-<YYYY-MM-DD>-iter-<iteration>
           if real_issues non-empty: invoke `finding-resolution` skill (via `Skill` tool) with the whole real_issues batch, Step 2 context, and target-skill-path; it drains its own queue (including anything its Step 15/16 discovers) and reports back fixed vs. unfixed issues
@@ -79,28 +79,37 @@ Run the skill against this test input: <test input verbatim>
 Save all artifacts to: docs/skill-optimizer-runs/<target-skill-name>/<YYYY-MM-DD>/iteration-<iteration>/run-<i>/
 Follow the skill's instructions exactly. Do not skip phases. Do not declare done without writing artifacts.
 
-When complete, your final text IS the return value. Report:
-1. Final output path
-2. Exit gates defined by skill, with pass/fail
-3. Any phase not completed and why
-4. Harness friction (tool blocked, dispatch failed, etc.)
+When complete, your final text IS the return value — report any harness friction (tool blocked, dispatch failed, etc.).
 ```
 
-Wait for all background task notifications (do not poll).
+Wait for all background task notifications. Before calling any wait/poll/sleep-like tool (`ScheduleWakeup`, a `TaskOutput` status-check loop, a `Bash` sleep loop) to wait on this dispatch, ask: is this for work I background-dispatched in this same flow? If yes — stop, do not call it; the harness delivers a `task-notification` automatically when each completes, and calling one anyway is the failure mode, not a safety margin. This does not apply to genuinely external/untracked work — `ScheduleWakeup` remains the correct tool there. A single status check is a legitimate escalation only after ending at least one full turn without the notification arriving; more than one check within the same turn is a loop, not an escalation, and is not legitimate.
 
 If a subagent fails to produce artifacts (no notification / crash / dispatch error / wrote nothing to its run directory), try one replacement. If that also fails, drop it. Let K = total drops this round. If (N-K) ≥ 3 carry on. If (N-K) < 3 abort (see Stopping Conditions).
 
 ### Step 2: Cross-run artifact comparison
 
-`Read` artifacts across run directories to compare findings. Also parse each subagent's return text for self-reports. Stay observation-driven.
+**Reviewer role**: a second, independent subagent role, one per runner (N reviewers for N runners — a separate headcount from Step 1's N). Read-only; Step 1's existing "wait for all background task notifications" barrier already guarantees every runner is done and flushed before Step 2 starts, so no separate completion signal is needed here.
+
+**Dispatch**: same mode as Step 1 — `run_in_background: true`, parallel, wait for all notifications before merging. Same failure handling as Step 1's replacement-then-drop policy and K/(N-K) ≥ 3 math; a reviewer that permanently fails records its run under this section's "Excluded runs (reason)" column with reason `reviewer-failed` — that column now holds either a runner-side or reviewer-side failure reason, distinguish by the reason string.
+
+**Reviewer inputs** (three, reference-only — reviewer never executes the target skill):
+1. The full `run-<i>/` directory — every file the runner produced, not a guessed filename or assumed structure.
+2. The test input from Input #2 (parent already holds this).
+3. The target skill's `SKILL.md` — schema/expected-fields reference, so the reviewer judges against the target skill's own definition rather than the runner's self-interpretation of it (a different purpose than Step 1's execution-read of the same file).
+
+**Reviewer output**: for each claim about that run's output, cite the specific file:line it came from. If the run directory, target `SKILL.md`, or Input #2 is empty, malformed, or missing, degrade gracefully and report `insufficient evidence` for that gap rather than guessing. Artifact that can't be cited by file:line → mark `[uncited]`, don't fabricate a line number.
+
+This includes exit-gate pass/fail claims: the reviewer checks each gate defined in the target skill's `SKILL.md` against the run's actual artifacts and cites the result, the same way as any other deviation — exit gates are part of "the target skill's own definition" the reviewer was already given input #3 to judge against. If the target skill defines no gates at all, report `N/A` for that run — this is a valid state, not a data gap, and must not be reported as `insufficient evidence`. If a gate is described only informally/in prose (no discrete checklist), and the reviewer cannot ground a pass/fail judgment in a specific citable line, mark it `[uncited]` rather than synthesizing a judgment call. A gate recurring as failed across ≥ N/3 runs is itself a candidate issue — route it into Cross-run's "Candidate issues for classification" the same way a recurring deviation would be, subject to the same citation bar: an `[uncited]` gate failure cannot supply the file:line evidence Step 3's `Real` classification requires, same as an `[uncited]` deviation. A one-off single-run gate failure is not, by itself, evidence of a target-skill defect.
+
+Parent merges the N reviewer reports (not runner self-reports) to compare findings; before Step 3 accepts a candidate as `Real` (≥ N/3 recurrence), parent spot-checks that candidate's cited file:line evidence directly against the actual files. Stay observation-driven.
 
 Write `observations.md` (language follows conversation; bold elements stay English):
 
 **Per-run** (table):
 - Run ID
 - Artifacts produced
-- Exit gates pass/fail (N/A if none)
-- Self-reported deviations
+- Exit gates pass/fail (N/A if none) — reviewer-verified against the target skill's own definition; runner self-report is no longer an accepted source for this column, same standard as the deviations column below
+- Reviewer-cited deviations (file:line) — runner self-report is no longer an accepted source for this column
 - Harness friction
 - Excluded runs (reason)
 
@@ -117,9 +126,9 @@ Echo the Pace mantra verbatim (see `## Pace`) before continuing.
 
 For each candidate issue (from observations.md Cross-run):
 
-- **Real issue**: ≥ N/3 runs with artifact evidence — fix.
+- **Real issue**: ≥ N/3 runs with reviewer-cited artifact evidence (file:line) — fix.
 - **Suspected**: < N/3 runs — defer. At N=3 this never fires.
-- **Hypothetical (file-imagined)**: subagent's text-only claim, no artifact backing — drop.
+- **Hypothetical (file-imagined)**: runner's text-only claim with no reviewer citation backing it — drop.
 
 Examples (N=3, threshold ≥ 1; any artifact-backed hit counts):
 - 1/3 runs skip same instruction with artifact evidence → real

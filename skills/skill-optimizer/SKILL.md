@@ -1,6 +1,6 @@
 ---
 name: skill-optimizer
-description: Iteratively optimize an existing skill by running N parallel subagents against a test input, comparing artifacts across runs, identifying real issues (failures reproduced in ≥ N/3 of runs), and fixing the skill via a 16-step revision flow. Loops until M consecutive empty rounds = convergence. Use whenever the user asks to iterate, optimize, refine, harden, improve, validate, or empirically debug an existing skill against a real task — even if they only say "make this skill better" or "find bugs in this skill". Do NOT use for creating a new skill from scratch (use skill-creator instead).
+description: Iteratively optimize an existing skill by running N parallel subagents against a test input, comparing artifacts across runs, identifying real issues (failures reproduced in ≥ N/3 of runs, or a mission-fit gap ≥ N/3 reviewers independently cite) and fixing the skill via a 16-step revision flow. Loops until M consecutive empty rounds = convergence. Use whenever the user asks to iterate, optimize, refine, harden, improve, validate, or empirically debug an existing skill against a real task — even if they only say "make this skill better" or "find bugs in this skill". Do NOT use for creating a new skill from scratch (use skill-creator instead).
 ---
 
 # Skill Optimizer
@@ -55,7 +55,7 @@ loop:
   if iteration > 20: break (hard cap)
   step 1: spawn N subagents in parallel, each running target skill against test input
   step 2: dispatch N reviewer subagents (one per runner) to independently read each run's full output directory; merge into cross-run artifact comparison
-  step 3: classify issues (real if ≥ N/3 runs show the same observed failure)
+  step 3: classify issues (real if ≥ N/3 runs show the same observed failure, or ≥ N/3 reviewers independently cite the same mission-fit gap)
   step 4: cp -r <target-skill-path>/. /tmp/skill-optimizer-snapshot-<target-skill-name>-<YYYY-MM-DD>-iter-<iteration>
           if real_issues non-empty: invoke `finding-resolution` skill (via `Skill` tool) with the whole real_issues batch, Step 2 context, and target-skill-path; it drains its own queue (including anything its Step 15/16 discovers) and reports back fixed vs. unfixed issues
           unfixed = finding-resolution's reported unfixed list (issue + reason: non-issue / crashed / declined)
@@ -97,11 +97,13 @@ If a subagent fails to produce artifacts (no notification / crash / dispatch err
 2. The test input from Input #2 (parent already holds this).
 3. The target skill's `SKILL.md` — schema/expected-fields reference, so the reviewer judges against the target skill's own definition rather than the runner's self-interpretation of it (a different purpose than Step 1's execution-read of the same file).
 
+While reading input #3, also judge whether the target skill's own definition serves the purpose stated in its own frontmatter. A valid observation needs the same evidence discipline as any other finding in this section: quote the purpose claim verbatim from the target `SKILL.md` (never the reviewer's own paraphrase of "what it probably means"), and ground it in an actual run (cite `run-<i>/` — not a hypothetical). If a deviation is already citable by file:line, it stays a file:line finding — this channel exists only for what genuinely can't be pinned to a line, not as a way around that bar. E.g.: target skill states its purpose as "catch races before production"; Phase 4's gate re-checks what Phase 2 already checks while no phase covers message-reordering races, and run-2's target codebase had an actual reordering bug every phase missed — that's a valid observation; "the phasing feels bureaucratic" with no quoted purpose and no cited run is not.
+
 **Reviewer output**: for each claim about that run's output, cite the specific file:line it came from. If the run directory, target `SKILL.md`, or Input #2 is empty, malformed, or missing, degrade gracefully and report `insufficient evidence` for that gap rather than guessing. Artifact that can't be cited by file:line → mark `[uncited]`, don't fabricate a line number.
 
 This includes exit-gate pass/fail claims: the reviewer checks each gate defined in the target skill's `SKILL.md` against the run's actual artifacts and cites the result, the same way as any other deviation — exit gates are part of "the target skill's own definition" the reviewer was already given input #3 to judge against. If the target skill defines no gates at all, report `N/A` for that run — this is a valid state, not a data gap, and must not be reported as `insufficient evidence`. If a gate is described only informally/in prose (no discrete checklist), and the reviewer cannot ground a pass/fail judgment in a specific citable line, mark it `[uncited]` rather than synthesizing a judgment call. A gate recurring as failed across ≥ N/3 runs is itself a candidate issue — route it into Cross-run's "Candidate issues for classification" the same way a recurring deviation would be, subject to the same citation bar: an `[uncited]` gate failure cannot supply the file:line evidence Step 3's `Real` classification requires, same as an `[uncited]` deviation. A one-off single-run gate failure is not, by itself, evidence of a target-skill defect.
 
-Parent merges the N reviewer reports (not runner self-reports) to compare findings; before Step 3 accepts a candidate as `Real` (≥ N/3 recurrence), parent spot-checks that candidate's cited file:line evidence directly against the actual files. Stay observation-driven.
+Parent merges the N reviewer reports (not runner self-reports) to compare findings; before Step 3 accepts a candidate as `Real` (≥ N/3 recurrence), parent spot-checks that candidate's cited evidence directly against the actual files — file:line for a mechanical deviation, or that the quoted purpose claim really appears verbatim in the target `SKILL.md` and the cited run scenario really occurred for a mission-fit observation. Stay observation-driven.
 
 Write `observations.md` (language follows conversation; bold elements stay English):
 
@@ -119,6 +121,7 @@ Write `observations.md` (language follows conversation; bold elements stay Engli
 - Finding count + scope spread
 - Recurring issues from prior summary.md (skip on iteration 1)
 - Candidate issues for classification
+- Mission-fit observations (quoted purpose claim + cited run scenario, kept separate from Candidate issues above — different evidence shape)
 
 ### Step 3: Classify issues
 
@@ -129,11 +132,15 @@ For each candidate issue (from observations.md Cross-run):
 - **Real issue**: ≥ N/3 runs with reviewer-cited artifact evidence (file:line) — fix.
 - **Suspected**: < N/3 runs — defer. At N=3 this never fires.
 - **Hypothetical (file-imagined)**: runner's text-only claim with no reviewer citation backing it — drop.
+- **Real mission-fit issue**: ≥ N/3 reviewers independently name the same quoted purpose claim + cite the same run scenario — fix, routed through `finding-resolution` the same as a real issue (it decides severity through whatever path it already uses for any other finding — no new vocabulary here). This is a distinct pipeline point from `finding-resolution`'s own Step 7 mission-alignment lens, which only evaluates a fix's direction after a finding is already flagged — the two don't compete, since this step is what supplies the candidate in the first place.
+- **Suspected mission-fit**: < N/3 reviewers — defer, same as Suspected above.
+- **Hypothetical mission-fit (reviewer-imagined)**: a reviewer's claim with no verbatim purpose quote or no cited run scenario — drop, same as Hypothetical above.
 
 Examples (N=3, threshold ≥ 1; any artifact-backed hit counts):
 - 1/3 runs skip same instruction with artifact evidence → real
 - 1/3 self-report tool blocked, no artifact → hypothetical (drop)
 - "method count 7 vs 6" from reading skill, no failure → hypothetical
+- 1/3 reviewers name the skill's own stated purpose + cite a real run where the current phase structure let a matching bug through → real mission-fit issue
 
 ### Step 4: If real issues, fix; else count empty round
 
@@ -161,7 +168,7 @@ Write `docs/skill-optimizer-runs/<target-skill-name>/<YYYY-MM-DD>/iteration-<ite
 
 - **Iteration**: <iteration>
 - **Runs**: succeeded count / excluded (with reason)
-- **Real issues** found: title + ≥ N/3 evidence
+- **Real issues** found: title + ≥ N/3 evidence (file:line for mechanical issues; quoted purpose claim + cited run scenario for mission-fit issues)
 - **Suspected issues** deferred: title + source + reason
 - **Changes applied**: file:line + 1-line diff per change
 - **Unfixed**: issue title + reason (`non-issue` / `crashed` / `declined`)

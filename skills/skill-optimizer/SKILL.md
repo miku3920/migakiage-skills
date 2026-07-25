@@ -1,11 +1,11 @@
 ---
 name: skill-optimizer
-description: Iteratively optimize an existing skill by running N parallel subagents against a test input, comparing artifacts across runs, identifying real issues (failures reproduced in ≥ N/3 of runs, or a mission-fit gap ≥ N/3 reviewers independently cite) and fixing the skill via a 16-step revision flow. Loops until M consecutive empty rounds = convergence. Use whenever the user asks to iterate, optimize, refine, harden, improve, validate, or empirically debug an existing skill against a real task — even if they only say "make this skill better" or "find bugs in this skill". Do NOT use for creating a new skill from scratch (use skill-creator instead).
+description: Iteratively optimize an existing skill by running N parallel subagents against a test input, comparing artifacts across runs, identifying real issues (failures reproduced in ≥ N/3 of runs, or a mission-fit gap ≥ N/3 reviewers independently cite) and fixing the skill via a 20-step revision flow. Loops until M consecutive empty rounds = convergence. Use whenever the user asks to iterate, optimize, refine, harden, improve, validate, or empirically debug an existing skill against a real task — even if they only say "make this skill better" or "find bugs in this skill". Do NOT use for creating a new skill from scratch (use skill-creator instead).
 ---
 
 # Skill Optimizer
 
-This skill hammers an existing skill against a real task: spawn parallel runs, compare artifacts, fix the real issues, repeat. Every fix goes through the `finding-resolution` skill's 16-step flow.
+This skill hammers an existing skill against a real task: spawn parallel runs, compare artifacts, fix the real issues, repeat. Every fix goes through the `finding-resolution` skill's 20-step flow.
 
 **Output language:** match the user's conversation language for AskUserQuestion, narration, and the final report. Subagent prompts and this skill's body stay English.
 
@@ -19,7 +19,7 @@ Echo the mantra at cue points; keep the pacing mindset everywhere else.
 
 > Take a breath. Step by step, slowly, think each one through until it's clear. Stay calm, keep your established rhythm, neither hurried nor sluggish.
 
-**Cue point** — parent restates mantra verbatim as first line, before each outer-loop Step 3 (Classify). (`finding-resolution` echoes its own copy of this mantra before each issue's inner Step 1 — that's its responsibility, not this skill's.)
+**Cue point** — parent restates mantra verbatim as first line, before each outer-loop Step 3 (Classify). (`finding-resolution` echoes its own copy of this mantra before each issue's inner **Explore** step — that's its responsibility, not this skill's.)
 
 Skipping the echo because "I just did one" is the failure mode.
 
@@ -57,8 +57,8 @@ loop:
   step 2: dispatch N reviewer subagents (one per runner) to independently read each run's full output directory; merge into cross-run artifact comparison
   step 3: classify issues (real if ≥ N/3 runs show the same observed failure, or ≥ N/3 reviewers independently cite the same mission-fit gap)
   step 4: cp -r <target-skill-path>/. /tmp/skill-optimizer-snapshot-<target-skill-name>-<YYYY-MM-DD>-iter-<iteration>
-          if real_issues non-empty: invoke `finding-resolution` skill (via `Skill` tool) with the whole real_issues batch, Step 2 context, and target-skill-path; it drains its own queue (including anything its Step 15/16 discovers) and reports back fixed vs. unfixed issues
-          unfixed = finding-resolution's reported unfixed list (issue + reason: non-issue / crashed / declined)
+          if real_issues non-empty: invoke `finding-resolution` skill (via `Skill` tool) with the whole real_issues batch, Step 2 context, and target-skill-path; it drains its own queue (including anything its Read-through/Regression check discovers) and reports back fixed vs. unfixed issues
+          unfixed = finding-resolution's reported unfixed list (issue + reason: model-compliance / noise / non-issue / crashed)
           if `diff -r /tmp/skill-optimizer-snapshot-<target-skill-name>-<YYYY-MM-DD>-iter-<iteration> <target-skill-path>` shows any change: empty_rounds = 0
           else: empty_rounds += 1
           outcome_label = nothing-found | fixing | rejected-all | partial | errored
@@ -137,7 +137,7 @@ For each candidate issue (from observations.md Cross-run):
 - **Real issue**: ≥ N/3 runs with reviewer-cited artifact evidence (file:line) — fix.
 - **Suspected**: < N/3 runs — defer. At N=3 this never fires.
 - **Hypothetical (file-imagined)**: runner's text-only claim with no reviewer citation backing it — drop.
-- **Real mission-fit issue**: ≥ N/3 reviewers independently name the same quoted purpose claim + cite the same run scenario — fix, routed through `finding-resolution` the same as a real issue (it decides severity through whatever path it already uses for any other finding — no new vocabulary here). This is a distinct pipeline point from `finding-resolution`'s own Step 7 mission-alignment lens, which only evaluates a fix's direction after a finding is already flagged — the two don't compete, since this step is what supplies the candidate in the first place.
+- **Real mission-fit issue**: ≥ N/3 reviewers independently name the same quoted purpose claim + cite the same run scenario — fix, routed through `finding-resolution` the same as a real issue (it decides severity through whatever path it already uses for any other finding — no new vocabulary here). This is a distinct pipeline point from `finding-resolution`'s own Expand check mission-alignment lens, which only evaluates a fix's direction after a finding is already flagged — the two don't compete, since this step is what supplies the candidate in the first place.
 - **Suspected mission-fit**: < N/3 reviewers — defer, same as Suspected above.
 - **Hypothetical mission-fit (reviewer-imagined)**: a reviewer's claim with no verbatim purpose quote or no cited run scenario — drop, same as Hypothetical above.
 
@@ -149,7 +149,7 @@ Examples (N=3, threshold ≥ 1; any artifact-backed hit counts):
 
 ### Step 4: If real issues, fix; else count empty round
 
-If `real_issues` is non-empty, invoke the `finding-resolution` skill (via the `Skill` tool) once with the whole batch: pass the full `real_issues` list as Issues, the target skill's stated purpose (frontmatter description + intro paragraph) as Context, and `<target-skill-path>` as Target location. It drains its own queue one issue at a time through its 16-step flow — including any related issues its own Step 15/16 discovers — and reports back which issues were fixed (file:line + summary) versus unfixed (issue + reason: `non-issue` / `crashed` / `declined`).
+If `real_issues` is non-empty, invoke the `finding-resolution` skill (via the `Skill` tool) once with the whole batch: pass the full `real_issues` list as Issues, the target skill's stated purpose (frontmatter description + intro paragraph) as Context, and `<target-skill-path>` as Target location. It drains its own queue one issue at a time through its 20-step flow — including any related issues its own Read-through/Regression check discovers — and reports back which issues were fixed (file:line + summary) versus unfixed (issue + reason: `model-compliance` / `noise` / `non-issue` / `crashed`).
 
 `empty_rounds` is updated on Step 4 **outcome**, measured by `diff -r` of the target skill directory against a `cp -r` snapshot taken at Step 4 entry (same snapshot mechanism as Phase 0 backup). If any file differs, `empty_rounds = 0`; otherwise `empty_rounds += 1`. This automatically covers:
 - All issues resolve as `non-issue` → no edit → counted as empty
@@ -176,7 +176,7 @@ Write `docs/skill-optimizer-runs/<target-skill-name>/<YYYY-MM-DD>/iteration-<ite
 - **Real issues** found: title + ≥ N/3 evidence (file:line for mechanical issues; quoted purpose claim + cited run scenario for mission-fit issues)
 - **Suspected issues** deferred: title + source + reason
 - **Changes applied**: file:line + 1-line diff per change
-- **Unfixed**: issue title + reason (`non-issue` / `crashed` / `declined`)
+- **Unfixed**: issue title + reason (`model-compliance` / `noise` / `non-issue` / `crashed`)
 - **Outcome label**: `nothing-found` / `fixing` / `rejected-all` / `partial` / `errored`
 - **Diff stat**: file count / line count (from `diff -r` against Step 4 snapshot)
 - **empty_rounds** counter
@@ -187,7 +187,7 @@ Language follows conversation; bold elements stay English.
 
 ## Inner Flow
 
-Every real issue's fix goes through the `finding-resolution` skill's 16-step flow (Verify facts → Context → Problem → Classify → Research → Intervention type + initial proposal → Expand check → Expanded version → Trim check → Trimmed version → KISS check → First-principles version → Apply → Verify → Read-through → Regression check). That skill owns the step definitions, the pendulum discipline, dispatch modes, and the 5 KISS rules — see outer Step 4 for how this skill invokes it.
+Every real issue's fix goes through the `finding-resolution` skill's 20-step flow (Explore → Fact check → Red verify → Context → Problem → Attribution → Classify → Research → Initial proposal → Expand check → Expanded version → Trim check → Trimmed version → KISS check → KISS version → Apply → Green verify → Review → Read-through → Regression check). That skill owns the step definitions, the pendulum discipline, dispatch modes, and the 5 KISS rules — see outer Step 4 for how this skill invokes it.
 
 ---
 
